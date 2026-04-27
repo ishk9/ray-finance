@@ -12,6 +12,8 @@ import { runDailySync } from "../daily-sync.js";
 import { startLinkServer } from "../server.js";
 import { addManualAccount, getManualAccounts, removeManualAccount, scrapeRedfinEstimate } from "../property.js";
 import { heading, progressBar, formatMoney, formatMoneyColored, padColumns, dim, formatDuration, formatError, renderLogo, institutionName } from "./format.js";
+import { isSetuConfigured, isPlaidConfigured, config } from "../config.js";
+import { AA_HANDLES } from "../setu/types.js";
 
 export async function runSync(): Promise<void> {
   const ora = (await import("ora")).default;
@@ -30,6 +32,20 @@ export async function runSync(): Promise<void> {
 }
 
 export async function runLink(): Promise<void> {
+  if (isSetuConfigured()) {
+    await runSetuLink();
+    return;
+  }
+  if (!isPlaidConfigured()) {
+    console.log(chalk.yellow("\nNo bank provider configured."));
+    console.log(dim("  For Indian banks: run 'ray setup' and choose the Setu option."));
+    console.log(dim("  For US banks: run 'ray setup' and add Plaid credentials.\n"));
+    return;
+  }
+  await runPlaidLink();
+}
+
+async function runPlaidLink(): Promise<void> {
   const open = (await import("open")).default;
   const ora = (await import("ora")).default;
   const readline = await import("readline");
@@ -79,6 +95,122 @@ export async function runLink(): Promise<void> {
     } else {
       rl.close();
     }
+  }
+}
+
+async function runSetuLink(): Promise<void> {
+  const open = (await import("open")).default;
+  const ora = (await import("ora")).default;
+  const inquirer = (await import("inquirer")).default;
+
+  console.log(`\n${heading("Link Indian Bank Account")}\n`);
+  console.log(dim("  Uses RBI Account Aggregator (AA) framework via Setu.\n"));
+
+  const theme = {
+    style: {
+      answer: (text: string) => chalk.yellowBright(text),
+      highlight: (text: string) => chalk.yellowBright(text),
+    },
+  };
+
+  // Ask for mobile number + AA handle
+  const { mobile, aaHandle } = await inquirer.prompt([
+    {
+      theme,
+      type: "input",
+      name: "mobile",
+      message: "Your mobile number (linked to AA):",
+      validate: (v: string) => /^\d{10}$/.test(v.trim()) || "Enter a 10-digit mobile number",
+    },
+    {
+      theme,
+      type: "list",
+      name: "aaHandle",
+      message: "Account Aggregator handle:",
+      choices: AA_HANDLES.map((h) => ({ name: h.name, value: h.value })),
+    },
+  ]);
+
+  const vua = `${mobile.trim()}@${aaHandle}`;
+
+  // Ask which FI types to fetch
+  const { fiTypes } = await inquirer.prompt([{
+    theme,
+    type: "checkbox",
+    name: "fiTypes",
+    message: "What data would you like to share?",
+    choices: [
+      { name: "Bank accounts & transactions (DEPOSIT)", value: "DEPOSIT", checked: true },
+      { name: "Mutual funds (MUTUAL_FUNDS)", value: "MUTUAL_FUNDS", checked: true },
+      { name: "Stocks / equities (EQUITIES)", value: "EQUITIES", checked: false },
+      { name: "Fixed deposits (TERM_DEPOSIT)", value: "TERM_DEPOSIT", checked: false },
+      { name: "SIPs (SIP)", value: "SIP", checked: false },
+    ],
+    validate: (v: string[]) => v.length > 0 || "Select at least one",
+  }]);
+
+  const db = getDb();
+
+  // Start the local server for the consent redirect callback
+  const { startSetuLinkServer } = await import("../server.js");
+  const { waitForConsent, stop, redirectUrl, publicUrl } = await startSetuLinkServer(config.ngrokAuthToken);
+
+  try {
+    const { createConsent, createSession, pollSessionUntilReady, fetchAndIngestFIData } = await import("../setu/aa.js");
+
+    const spinner = ora("Creating consent request...").start();
+    let consentId: string;
+    let consentUrl: string;
+
+    try {
+      const result = await createConsent(db, vua, redirectUrl, { fiTypes });
+      consentId = result.consentId;
+      consentUrl = result.url;
+      spinner.succeed(`Consent request created.`);
+    } catch (err: any) {
+      spinner.fail(`Failed to create consent: ${err.message}`);
+      stop();
+      return;
+    }
+
+    console.log(`\n  Opening Setu consent screen in your browser...\n`);
+    if (publicUrl) {
+      console.log(dim(`  Callback URL (ngrok): ${publicUrl}/setu/callback\n`));
+    }
+    console.log(dim(`  Consent URL: ${consentUrl}\n`));
+
+    await open(consentUrl);
+
+    const waitSpinner = ora("Waiting for you to approve consent in your AA app...").start();
+    const consentResult = await waitForConsent(consentId);
+    stop();
+
+    if (consentResult.status !== "APPROVED") {
+      waitSpinner.fail(`Consent ${consentResult.status}. Run 'ray link' to try again.`);
+      return;
+    }
+
+    waitSpinner.succeed("Consent approved!");
+
+    // Create data session and poll / wait for data
+    const sessionSpinner = ora("Requesting financial data from your bank...").start();
+    try {
+      const sessionId = await createSession(db, consentId);
+      const sessionStatus = await pollSessionUntilReady(db, sessionId);
+
+      if (sessionStatus === "COMPLETED" || sessionStatus === "PARTIAL") {
+        const result = await fetchAndIngestFIData(db, sessionId);
+        sessionSpinner.succeed(
+          `Data synced! ${result.accountsLinked} account(s), ${result.transactionsAdded} transaction(s).`
+        );
+      } else {
+        sessionSpinner.fail(`Data session ended with status: ${sessionStatus}. Try 'ray sync' later.`);
+      }
+    } catch (err: any) {
+      sessionSpinner.fail(`Data fetch failed: ${err.message}`);
+    }
+  } finally {
+    stop();
   }
 }
 

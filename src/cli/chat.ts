@@ -275,7 +275,8 @@ export async function startChat(): Promise<void> {
   const hasAccounts = db.prepare("SELECT COUNT(*) as count FROM accounts").get() as { count: number };
   if (hasAccounts.count === 0) {
     if (!config.plaidClientId || !config.plaidSecret) {
-      console.log(chalk.yellow("No accounts linked. Add Plaid credentials via 'ray setup', then run 'ray link'.\n"));
+      console.log(chalk.yellow("No accounts linked. Add Plaid credentials via 'ray setup', then run 'ray link'."));
+      console.log(chalk.dim("  For Indian banks: run 'ray setup' and choose the Setu option, then 'ray link'.\n"));
       return;
     }
     console.log(chalk.yellow("No accounts linked yet. Let's connect one first.\n"));

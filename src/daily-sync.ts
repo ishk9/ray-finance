@@ -12,9 +12,10 @@ import {
 } from "./plaid/sync.js";
 import { calculateDailyScore, checkAchievements } from "./scoring/index.js";
 import { decryptPlaidToken } from "./db/encryption.js";
-import { config } from "./config.js";
+import { config, isSetuConfigured } from "./config.js";
 import { institutionName } from "./cli/format.js";
 import { refreshPropertyValues, hasListingUrls } from "./property.js";
+import { syncAllSetuAccounts } from "./setu/aa.js";
 
 export interface SyncResult {
   transactionsAdded: number;
@@ -34,9 +35,27 @@ export async function runDailySync(db: Database): Promise<SyncResult> {
     primary_color: string | null;
   }[];
 
+  // Sync Setu (Indian AA) accounts first
+  if (isSetuConfigured()) {
+    try {
+      const setuResult = await syncAllSetuAccounts(db);
+      if (setuResult.accountsLinked > 0 || setuResult.transactionsAdded > 0) {
+        console.log(
+          `Setu sync: ${setuResult.accountsLinked} account(s), +${setuResult.transactionsAdded} transaction(s), ${setuResult.holdingsUpdated} holding(s) updated`
+        );
+      }
+    } catch (err: any) {
+      console.error(`Setu sync failed: ${err.message}`);
+    }
+  }
+
   if (institutions.length === 0) {
-    console.log("No linked institutions.");
-    return { transactionsAdded: 0, institutionsSynced: 0 };
+    // Only print if no Plaid institutions; Setu accounts don't use institutions the same way
+    const setuAccounts = db.prepare(`SELECT COUNT(*) as n FROM accounts WHERE source = 'setu'`).get() as { n: number };
+    if (setuAccounts.n === 0) {
+      console.log("No linked institutions.");
+      return { transactionsAdded: 0, institutionsSynced: 0 };
+    }
   }
 
   let totalAdded = 0;

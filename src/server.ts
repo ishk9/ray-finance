@@ -9,6 +9,7 @@ import { CountryCode } from "plaid";
 import { encryptPlaidToken } from "./db/encryption.js";
 import { config } from "./config.js";
 import { getDb } from "./db/connection.js";
+import type { SetuWebhookPayload } from "./setu/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -253,4 +254,147 @@ export function startLinkServer(): LinkResult {
       server.close();
     },
   };
+}
+
+// ─── Setu AA Link Server ──────────────────────────────────────────────────────
+
+interface SetuLinkResult {
+  /** Local redirect URL to pass as redirectUrl in consent creation */
+  redirectUrl: string;
+  /** Public ngrok URL (if ngrok is configured), else null */
+  publicUrl: string | null;
+  /** Resolves when consent callback is received with the consent status */
+  waitForConsent: (consentId: string) => Promise<{ status: string }>;
+  stop: () => void;
+}
+
+/**
+ * Start a local express server to handle the Setu AA consent redirect callback.
+ * Optionally starts an ngrok tunnel if an auth token is provided.
+ */
+export async function startSetuLinkServer(ngrokAuthToken?: string): Promise<SetuLinkResult> {
+  const app = express();
+  app.use(express.json());
+
+  let resolveConsent: ((result: { status: string }) => void) | null = null;
+  const consentPromise = new Map<string, Promise<{ status: string }>>();
+  const consentResolvers = new Map<string, (result: { status: string }) => void>();
+
+  /**
+   * Setu redirects the user's browser here after consent approval/rejection.
+   * Query params: ?status=APPROVED&consentId=xxx (or REJECTED)
+   */
+  app.get("/setu/callback", (req, res) => {
+    const { consentId, status } = req.query as { consentId?: string; status?: string };
+    const consentStatus = status ?? "UNKNOWN";
+
+    // Update consent in DB
+    try {
+      const db = getDb();
+      db.prepare(`UPDATE setu_consents SET status = ? WHERE consent_id = ?`).run(
+        consentStatus.toUpperCase(),
+        consentId ?? ""
+      );
+    } catch {}
+
+    // Signal the waiting CLI
+    if (consentId && consentResolvers.has(consentId)) {
+      consentResolvers.get(consentId)!({ status: consentStatus.toUpperCase() });
+      consentResolvers.delete(consentId);
+    } else if (resolveConsent) {
+      resolveConsent({ status: consentStatus.toUpperCase() });
+    }
+
+    const statusEmoji = consentStatus.toUpperCase() === "APPROVED" ? "✓" : "✗";
+    res.send(`
+      <html>
+        <body style="font-family:sans-serif;padding:40px;text-align:center">
+          <h2>${statusEmoji} Consent ${consentStatus}</h2>
+          <p>You can close this tab and return to the terminal.</p>
+        </body>
+      </html>
+    `);
+  });
+
+  /**
+   * Setu posts SESSION_STATUS_UPDATE here (only when ngrok is configured
+   * and the webhook URL is registered in the Setu dashboard).
+   */
+  app.post("/setu/webhook", async (req, res) => {
+    const payload = req.body as SetuWebhookPayload;
+    res.json({ message: "Notification received successfully." });
+
+    if (payload.type === "SESSION_STATUS_UPDATE") {
+      try {
+        const db = getDb();
+        db.prepare(`UPDATE setu_sessions SET status = ? WHERE session_id = ?`).run(
+          payload.data.status,
+          payload.dataSessionId
+        );
+        // Also update consent status if session completed
+        if (payload.data.status === "COMPLETED" || payload.data.status === "PARTIAL") {
+          db.prepare(`UPDATE setu_consents SET status = 'APPROVED' WHERE consent_id = ?`).run(
+            payload.consentId
+          );
+        }
+      } catch {}
+    } else if (payload.type === "CONSENT_STATUS_UPDATE") {
+      try {
+        const db = getDb();
+        db.prepare(`UPDATE setu_consents SET status = ? WHERE consent_id = ?`).run(
+          payload.data.status,
+          payload.consentId
+        );
+        if (consentResolvers.has(payload.consentId)) {
+          consentResolvers.get(payload.consentId)!({ status: payload.data.status });
+          consentResolvers.delete(payload.consentId);
+        }
+      } catch {}
+    }
+  });
+
+  const server = app.listen(config.port, "127.0.0.1");
+
+  // Start ngrok tunnel if auth token is provided
+  let publicUrl: string | null = null;
+  let ngrokListener: { close: () => Promise<void> } | null = null;
+
+  if (ngrokAuthToken) {
+    try {
+      const ngrok = await import("@ngrok/ngrok");
+      ngrokListener = await ngrok.connect({
+        addr: config.port,
+        authtoken: ngrokAuthToken,
+      }) as unknown as { close: () => Promise<void> };
+      // @ngrok/ngrok returns the listener with a url() method
+      const listenerWithUrl = ngrokListener as unknown as { url: () => string };
+      publicUrl = typeof listenerWithUrl.url === "function" ? listenerWithUrl.url() : null;
+    } catch (err: any) {
+      console.warn(`  ngrok failed to start: ${err.message}. Falling back to polling.`);
+      publicUrl = null;
+    }
+  }
+
+  const localBase = `http://localhost:${config.port}`;
+  const base = publicUrl ?? localBase;
+  const redirectUrl = `${base}/setu/callback`;
+
+  const stop = () => {
+    server.close();
+    if (ngrokListener) {
+      ngrokListener.close().catch(() => {});
+    }
+  };
+
+  // Auto-expire after 30 minutes
+  const timeout = setTimeout(stop, 30 * 60 * 1000);
+
+  const waitForConsent = (consentId: string): Promise<{ status: string }> => {
+    return new Promise<{ status: string }>((resolve) => {
+      consentResolvers.set(consentId, resolve);
+      resolveConsent = resolve;
+    });
+  };
+
+  return { redirectUrl, publicUrl, waitForConsent, stop: () => { clearTimeout(timeout); stop(); } };
 }

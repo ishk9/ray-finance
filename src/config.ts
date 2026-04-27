@@ -17,6 +17,12 @@ export interface RayConfig {
   userName: string;
   thinkingBudget: number;
   syncSchedule: string; // "HH:MM" for daily sync, "" for disabled
+  // Setu (India) — Account Aggregator
+  setuClientId: string;
+  setuClientSecret: string;
+  setuProductInstanceId: string;
+  setuEnv: string; // "sandbox" | "production"
+  ngrokAuthToken: string; // optional — for webhook-based session notifications
 }
 
 export const RAY_PROXY_BASE = "https://api.rayfinance.app/v1";
@@ -57,6 +63,11 @@ function buildConfig(): RayConfig {
     userName: file.userName || process.env.RAY_USER_NAME || "User",
     thinkingBudget: file.thinkingBudget ?? (Number(process.env.RAY_THINKING_BUDGET) || 8000),
     syncSchedule: file.syncSchedule || "",
+    setuClientId: file.setuClientId || process.env.SETU_CLIENT_ID || "",
+    setuClientSecret: file.setuClientSecret || process.env.SETU_CLIENT_SECRET || "",
+    setuProductInstanceId: file.setuProductInstanceId || process.env.SETU_PRODUCT_INSTANCE_ID || "",
+    setuEnv: file.setuEnv || process.env.SETU_ENV || "sandbox",
+    ngrokAuthToken: file.ngrokAuthToken || process.env.NGROK_AUTH_TOKEN || "",
   };
 }
 
@@ -64,6 +75,14 @@ export const config = buildConfig();
 
 export function isConfigured(): boolean {
   return !!config.anthropicKey || !!config.rayApiKey;
+}
+
+export function isSetuConfigured(): boolean {
+  return !!(config.setuClientId && config.setuClientSecret && config.setuProductInstanceId);
+}
+
+export function isPlaidConfigured(): boolean {
+  return !!(config.plaidClientId && config.plaidSecret);
 }
 
 export function saveConfig(partial: Partial<RayConfig>): void {

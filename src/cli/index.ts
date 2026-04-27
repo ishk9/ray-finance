@@ -59,11 +59,12 @@ program
 
 program
   .command("link")
-  .description("Link a new financial account via Plaid")
+  .description("Link a new financial account via Plaid or Setu (AA)")
   .action(async () => {
     ensureConfigured();
-    if (!useManaged() && (!config.plaidClientId || !config.plaidSecret)) {
-      console.error("Plaid credentials not configured. Run 'ray setup' to add them, or use a Ray API key for easy setup.");
+    const { isSetuConfigured, isPlaidConfigured } = await import("../config.js");
+    if (!useManaged() && !isPlaidConfigured() && !isSetuConfigured()) {
+      console.error("No bank provider configured. Run 'ray setup' to add Plaid (US banks) or Setu (Indian banks) credentials.");
       process.exit(1);
     }
     const { runLink } = await import("./commands.js");

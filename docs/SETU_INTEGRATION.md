@@ -186,15 +186,18 @@ export async function ingestFIData(db, fiData): Promise<SyncResult>
 
 ## Implementation Phases
 
-### Phase 1 — Core AA integration
-- [ ] `src/setu/client.ts` — authenticated HTTP client
-- [ ] `src/setu/types.ts` — FI data types (deposit, equities, mutual fund)
-- [ ] `src/setu/aa.ts` — consent creation, session management, FI data fetch
-- [ ] DB schema migration (add `source` column, `setu_consents`, `setu_sessions` tables)
-- [ ] `src/config.ts` — add Setu config fields
-- [ ] `ray setup` — Setu credentials wizard step
-- [ ] `ray link` — AA consent flow (opens browser or prints URL)
-- [ ] `ray sync` — Setu sync path
+### Phase 1 — Core AA integration ✅ COMPLETE
+- [x] `src/setu/client.ts` — authenticated HTTP client with token caching
+- [x] `src/setu/types.ts` — FI data types (deposit, equities, mutual fund) + AA handles
+- [x] `src/setu/categories.ts` — maps Indian transaction modes (UPI/NEFT/IMPS/NACH) to Ray categories
+- [x] `src/setu/aa.ts` — consent creation, session management, FI data fetch, ingest
+- [x] DB schema migration — `source` column on accounts/transactions, `setu_consents`, `setu_sessions` tables
+- [x] `src/config.ts` — Setu config fields + `isSetuConfigured()` / `isPlaidConfigured()` helpers
+- [x] `ray setup` — Setu option in wizard (alongside managed and Plaid)
+- [x] `ray link` — routes to AA consent flow when Setu is configured; opens ngrok tunnel if token provided
+- [x] `ray sync` — Setu sync path (re-fetches data for all APPROVED consents)
+- [x] `src/server.ts` — `/setu/callback` (consent redirect) + `/setu/webhook` (session notifications)
+- [x] `.env.example` — Setu + ngrok env vars documented
 
 ### Phase 2 — Indian context improvements
 - [ ] Map Indian transaction categories (UPI, NEFT, RTGS, IMPS, NACH) to Ray's category system

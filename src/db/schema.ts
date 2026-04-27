@@ -215,6 +215,24 @@ export function migrate(db: Database.Database): void {
       tokens_used INTEGER,
       created_at TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS setu_consents (
+      consent_id TEXT PRIMARY KEY,
+      consent_handle TEXT,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      fi_types TEXT NOT NULL DEFAULT '["DEPOSIT"]',
+      date_range_from TEXT,
+      date_range_to TEXT,
+      expires_at TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS setu_sessions (
+      session_id TEXT PRIMARY KEY,
+      consent_id TEXT NOT NULL REFERENCES setu_consents(consent_id),
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
   `);
 
   // Migrate: add logo and primary_color to institutions
@@ -234,6 +252,18 @@ export function migrate(db: Database.Database): void {
   const acctCols = db.prepare(`PRAGMA table_info(accounts)`).all() as { name: string }[];
   if (!acctCols.some(c => c.name === "balance_limit")) {
     db.exec(`ALTER TABLE accounts ADD COLUMN balance_limit REAL`);
+  }
+
+  // Migrate: add source column to accounts (plaid | setu | manual)
+  const acctColNames = db.prepare(`PRAGMA table_info(accounts)`).all() as { name: string }[];
+  if (!acctColNames.some(c => c.name === "source")) {
+    db.exec(`ALTER TABLE accounts ADD COLUMN source TEXT DEFAULT 'plaid'`);
+  }
+
+  // Migrate: add source column to transactions
+  const txColNames = db.prepare(`PRAGMA table_info(transactions)`).all() as { name: string }[];
+  if (!txColNames.some(c => c.name === "source")) {
+    db.exec(`ALTER TABLE transactions ADD COLUMN source TEXT DEFAULT 'plaid'`);
   }
 
   // Migrate: add vesting columns to holdings

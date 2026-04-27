@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "fs";
 import { dirname } from "path";
 import { config, saveConfig, getConfigPath, isConfigured, useManaged, RAY_PROXY_BASE } from "../config.js";
 import { heading, dim } from "./format.js";
+import { AA_HANDLES } from "../setu/types.js";
 
 function stepHeader(current: number, total: number): string {
   return chalk.dim(`Step ${current}/${total}`);
@@ -36,7 +37,8 @@ export async function runSetup(): Promise<void> {
     message: "How would you like to set up Ray?",
     choices: [
       { name: "Quick setup — we handle the API keys, your data stays local", value: "managed" },
-      { name: "Bring your own keys — use your own Anthropic and Plaid credentials", value: "selfhosted" },
+      { name: "Bring your own keys — Anthropic + Plaid (US banks)", value: "selfhosted" },
+      { name: "Bring your own keys — Anthropic + Setu (Indian banks via AA)", value: "setu" },
     ],
   }]);
 
@@ -111,7 +113,7 @@ export async function runSetup(): Promise<void> {
     });
 
     canLink = true;
-  } else {
+  } else if (setupMode === "selfhosted") {
     console.log(stepHeader(1, 4));
     const answers = await inquirer.prompt([
       {
@@ -179,6 +181,135 @@ export async function runSetup(): Promise<void> {
     });
 
     canLink = !!(answers.plaidClientId && answers.plaidSecret);
+  }
+
+  if (setupMode === "setu") {
+    console.log(stepHeader(1, 4));
+    const answers = await inquirer.prompt([
+      {
+        theme,
+        type: "input",
+        name: "userName",
+        message: "Your name:",
+        default: config.userName !== "User" ? config.userName : undefined,
+      },
+      {
+        theme,
+        type: "password",
+        name: "anthropicKey",
+        message: "Anthropic API key:",
+        default: config.anthropicKey || undefined,
+        validate: (v: string) => v.length > 0 || "Required",
+      },
+      {
+        theme,
+        type: "list",
+        name: "model",
+        message: "AI model:",
+        choices: [
+          { name: "Claude Sonnet 4.6 (recommended)", value: "claude-sonnet-4-6" },
+          { name: "Claude Haiku 4.5 (faster, cheaper)", value: "claude-haiku-4-5" },
+          { name: "Claude Opus 4.6 (most capable)", value: "claude-opus-4-6" },
+        ],
+        default: config.model,
+      },
+    ]);
+
+    // Use credentials already present in config/env — only prompt for missing ones
+    const setuCredsFromEnv = !!(config.setuClientId && config.setuClientSecret && config.setuProductInstanceId);
+    let setuClientId = config.setuClientId;
+    let setuClientSecret = config.setuClientSecret;
+    let setuProductInstanceId = config.setuProductInstanceId;
+    let setuEnv = config.setuEnv || "sandbox";
+
+    if (setuCredsFromEnv) {
+      console.log(chalk.green(`\n✓ Setu credentials loaded from environment\n`));
+      const { confirmEnv } = await inquirer.prompt([{
+        theme,
+        type: "list",
+        name: "confirmEnv",
+        message: "Setu environment:",
+        choices: [
+          { name: "Sandbox (testing, use setu-fip)", value: "sandbox" },
+          { name: "Production (real bank data)", value: "production" },
+        ],
+        default: setuEnv,
+      }]);
+      setuEnv = confirmEnv;
+    } else {
+      console.log(`\n  ${dim("Get your Setu credentials at")} https://console.setu.co\n`);
+      console.log(stepHeader(2, 4));
+      const setuAnswers = await inquirer.prompt([
+        {
+          theme,
+          type: "password",
+          name: "setuClientId",
+          message: "Setu Client ID:",
+          validate: (v: string) => v.length > 0 || "Required",
+        },
+        {
+          theme,
+          type: "password",
+          name: "setuClientSecret",
+          message: "Setu Client Secret:",
+          validate: (v: string) => v.length > 0 || "Required",
+        },
+        {
+          theme,
+          type: "password",
+          name: "setuProductInstanceId",
+          message: "Setu Product Instance ID:",
+          validate: (v: string) => v.length > 0 || "Required",
+        },
+        {
+          theme,
+          type: "list",
+          name: "setuEnv",
+          message: "Setu environment:",
+          choices: [
+            { name: "Sandbox (testing, use setu-fip)", value: "sandbox" },
+            { name: "Production (real bank data)", value: "production" },
+          ],
+          default: "sandbox",
+        },
+      ]);
+      setuClientId = setuAnswers.setuClientId;
+      setuClientSecret = setuAnswers.setuClientSecret;
+      setuProductInstanceId = setuAnswers.setuProductInstanceId;
+      setuEnv = setuAnswers.setuEnv;
+    }
+
+    console.log(stepHeader(3, 4));
+    console.log(dim(`\n  Optional: ngrok lets Ray receive real-time data notifications.`));
+    console.log(dim(`  Get a free token at https://dashboard.ngrok.com/get-started/your-authtoken\n`));
+    const { ngrokAuthToken } = await inquirer.prompt([{
+      theme,
+      type: "password",
+      name: "ngrokAuthToken",
+      message: "ngrok Auth Token (press Enter to skip — will use polling instead):",
+      default: config.ngrokAuthToken || undefined,
+    }]);
+
+    const { generateKey } = await import("../db/encryption.js");
+
+    saveConfig({
+      userName: answers.userName,
+      anthropicKey: answers.anthropicKey,
+      rayApiKey: "",
+      model: answers.model,
+      plaidClientId: "",
+      plaidSecret: "",
+      plaidEnv: "production",
+      dbEncryptionKey: config.dbEncryptionKey || generateKey(),
+      plaidTokenSecret: config.plaidTokenSecret || generateKey(),
+      setuClientId,
+      setuClientSecret,
+      setuProductInstanceId,
+      setuEnv,
+      ngrokAuthToken: ngrokAuthToken || "",
+    });
+
+    canLink = true;
   }
 
   // Ensure data directory exists
